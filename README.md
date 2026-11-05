@@ -106,7 +106,7 @@ There's no server involved. The plugin saves an invisible code to your real Disc
 - **Discord updates can break it:** the plugin patches Discord's code, so an update can stop parts of it working until the patches are fixed.
 - **Discord's rules:** client mods are against Discord's Terms of Service, so use this at your own risk.
 
-Tested on Windows with Discord stable 1.0.9267. The Mac steps follow Equicord's standard install process but haven't been tested on a Mac.
+Tested on Windows and Mac with Discord stable 1.0.9267.
 
 ## Update
 
