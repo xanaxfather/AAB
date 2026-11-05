@@ -108,6 +108,24 @@ There's no server involved. The plugin saves an invisible code to your real Disc
 
 Tested on Windows and Mac with Discord stable 1.0.9267.
 
+## Troubleshooting
+
+If something fails, AAB falls back to Discord's own badges for that part instead of breaking, and shows a toast with an error code. The plugin settings have a **Diagnostics** section showing what's working, plus a **Copy Diagnostics** button. The copied text has no user ids, names or bio text, so it's safe to send when reporting a problem.
+
+| Code | Meaning |
+|---|---|
+| AAB-100 | Discord changed its badge code, so badges can't be customized until the plugin is updated |
+| AAB-101 | Discord's badge list didn't load. AAB retries after a minute |
+| AAB-102 | One badge couldn't be customized, so Discord's version of that badge is showing |
+| AAB-103 | A profile's badge row couldn't be customized, so Discord's row is showing |
+| AAB-104 | Discord changed how badges are named, so profile badge rows can't be changed |
+| AAB-105 | A badge change couldn't be saved |
+| AAB-110 | Your shared choices couldn't be saved to your bio |
+| AAB-111 | Your bio is too long to fit the sharing code |
+| AAB-112 | Some badges are too new for the sharing format, so they were left out |
+
+New badges that Discord adds show up automatically, with their own art and text from Discord. If a badge is missing an image for a tier, the badge's main image is used instead.
+
 ## Update
 
 From your Equicord folder:

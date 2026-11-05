@@ -64,3 +64,13 @@
     outline: 2px solid var(--brand-500);
     outline-offset: -2px;
 }
+
+.vc-hmb-diagnostics {
+    color: var(--text-default);
+    font-size: 14px;
+    line-height: 20px;
+}
+
+.vc-hmb-diagnostics-line {
+    overflow-wrap: anywhere;
+}

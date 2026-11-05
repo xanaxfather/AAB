@@ -106,13 +106,36 @@ const fromTags = (text: string) => Array.from(text, c => String.fromCharCode((c.
 
 const SHARE_REGEX = new RegExp(`${toTags(MARKER)}([\\u{E0030}-\\u{E0039}\\u{E0061}-\\u{E007A}]*)${toTags(END)}`, "u");
 
-function tierIcons(tier: BadgeTier) {
+// A tier missing an image keeps the badge's own, so a half-filled new badge still shows something
+function tierIcons(tier: BadgeTier, badge: DirectoryBadge) {
+    const simple = tier.simple_icon_url ?? tier.simple_icon_raster_url;
     return {
-        rarity: tier.rarity,
-        simple_icon_url: tier.simple_icon_url,
-        simple_icon_raster_url: tier.simple_icon_raster_url,
-        complex_icon_static_url: tier.complex_icon_static_url,
+        rarity: tier.rarity ?? badge.rarity,
+        simple_icon_url: simple ?? badge.simple_icon_url,
+        simple_icon_raster_url: tier.simple_icon_raster_url ?? simple ?? badge.simple_icon_raster_url,
+        complex_icon_static_url: tier.complex_icon_static_url ?? (simple ? undefined : badge.complex_icon_static_url),
         complex_icon_animated_url: tier.complex_icon_animated_url
+    };
+}
+
+export const badgeIcon = (badge: DirectoryBadge) =>
+    badge.simple_icon_raster_url ?? badge.simple_icon_url ?? badge.complex_icon_static_url;
+
+/** Someone else's copy of a badge built from yours, for badges they share but Discord doesn't list for them. Keeps the art and tiers, drops your dates and counts. */
+export function asTemplate(badge: DirectoryBadge): DirectoryBadge {
+    return {
+        badge_id: badge.badge_id,
+        name: badge.name,
+        description: badge.description,
+        rarity: badge.rarity,
+        simple_icon_url: badge.simple_icon_url,
+        simple_icon_raster_url: badge.simple_icon_raster_url,
+        complex_icon_static_url: badge.complex_icon_static_url,
+        complex_icon_animated_url: badge.complex_icon_animated_url,
+        is_earnable: badge.is_earnable,
+        owned: false,
+        hidden: false,
+        tiers: badge.tiers?.map(tier => ({ ...tier, owned: false }))
     };
 }
 
@@ -192,7 +215,7 @@ export function applyChoice(rawBadge: DirectoryBadge, choice?: BadgeChoice, lear
 
     return {
         ...result,
-        ...tierIcons(tier),
+        ...tierIcons(tier, badge),
         // Shown badges read like a real owner's, hidden ones you haven't earned show what it takes to unlock them
         description: hidden ? tierDescription(badge, tier) : badge.owned ? badge.description : OWNER_DESCRIPTIONS[badge.badge_id] ?? tierDescription(badge, tier),
         info_label: isRealTier ? badge.info_label : tierLabel(badge, tier),
@@ -213,7 +236,7 @@ export function applyShared(rawBadge: DirectoryBadge, tierIndex?: number, learne
     const index = badge.tiers.indexOf(tier);
     return {
         ...badge,
-        ...tierIcons(tier),
+        ...tierIcons(tier, badge),
         description: OWNER_DESCRIPTIONS[badge.badge_id] ?? badge.description,
         info_label: tierLabel(badge, tier),
         owned: true,

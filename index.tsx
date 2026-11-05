@@ -10,17 +10,16 @@ import { definePluginSettings, migratePluginSettings } from "@api/Settings";
 import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { classNameFactory } from "@utils/css";
-import { fetchUserProfile } from "@utils/discord";
-import { Logger } from "@utils/Logger";
+import { copyWithToast, fetchUserProfile } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
 import { filters, findByCodeLazy, findByPropsLazy, findComponentByCodeLazy, findExportedComponentLazy, findStoreLazy, mapMangledModuleLazy } from "@webpack";
-import { Clickable, Constants, RestAPI, SearchableSelect, showToast, Tooltip, UserProfileStore, UserStore, useStateFromStores } from "@webpack/common";
+import { Clickable, Constants, RestAPI, SearchableSelect, Tooltip, UserProfileStore, UserStore, useStateFromStores } from "@webpack/common";
 import type { ComponentType, KeyboardEvent, ReactNode } from "react";
 
-import { applyChoice, applyShared, BadgeChoice, BadgeDetails, BadgeTier, decodeShare, DirectoryBadge, encodeShare, isLearnableBadge, SharedBadges, STAFF_BADGE_ID, stripShare, withBadgeDetails } from "./badges";
+import { applyChoice, applyShared, asTemplate, BadgeChoice, BadgeDetails, badgeIcon, BadgeTier, decodeShare, DirectoryBadge, encodeShare, isLearnableBadge, SharedBadges, STAFF_BADGE_ID, stripShare, withBadgeDetails } from "./badges";
+import { ERRORS, getErrors, guard, logger, report } from "./errors";
 
 const cl = classNameFactory("vc-hmb-");
-const logger = new Logger("AAB");
 
 // Name of the method our patch moves Discord's original getBadges() body into
 const ORIGINAL_GET_BADGES = "vcAABOriginal";
@@ -32,6 +31,10 @@ const DESCRIPTION = "Choose which badges you see on your own profile. Only you s
 
 const BIO_LIMIT = 190;
 const PUBLISH_DELAY = 3000;
+const CATALOG_RETRY_DELAY = 60_000;
+const HEALTH_CHECK_DELAY = 15_000;
+const SHARED_CACHE_LIMIT = 50;
+const KNOWN_BADGE_COUNT = 22;
 
 interface ProfileBadge {
     id: string;
@@ -42,7 +45,6 @@ interface ProfileBadge {
 
 interface DisplayProfile {
     userId?: string;
-    _userProfile?: { bio?: string | null; };
 }
 
 interface SectionProps {
@@ -66,7 +68,17 @@ interface BadgeDirectoryStoreType {
     getBadgeById(badgeId: number, userId?: string): DirectoryBadge | undefined;
     hasCatalogFor(userId: string): boolean;
     emitChange(): void;
-    [ORIGINAL_CATALOG](userId?: string): DirectoryBadge[];
+    [ORIGINAL_CATALOG]?(userId?: string): DirectoryBadge[];
+}
+
+type NumberedBadge = DirectoryBadge & { badge_id: number; };
+
+interface SharedCatalog {
+    shared: SharedBadges;
+    revision: number;
+    sources: DirectoryBadge[];
+    badges: NumberedBadge[];
+    byId: Map<number, NumberedBadge>;
 }
 
 const BadgeDirectoryStore: BadgeDirectoryStoreType = findStoreLazy("BadgeDirectoryStore");
@@ -85,11 +97,14 @@ const SettingsSection = findComponentByCodeLazy<SectionProps>('"data-migration-p
 
 let revision = 0;
 let ownBadgeCache = new WeakMap<DirectoryBadge, DirectoryBadge>();
-const sharedBadgeCache = new WeakMap<DirectoryBadge, { shared: SharedBadges; badge: DirectoryBadge; }>();
 let detailedBadgeCache = new WeakMap<DirectoryBadge, DirectoryBadge>();
 const sharedByBio = new Map<string, SharedBadges | null>();
+const sharedCatalogs = new Map<string, SharedCatalog>();
 let catalogRequested = false;
+let experimentForced = false;
 let publishTimer: ReturnType<typeof setTimeout> | undefined;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+let healthTimer: ReturnType<typeof setTimeout> | undefined;
 
 const settings = definePluginSettings({
     picker: {
@@ -106,7 +121,13 @@ const settings = definePluginSettings({
     seeShared: {
         type: OptionType.BOOLEAN,
         description: "Show badge choices shared by other people with this plugin.",
-        default: true
+        default: true,
+        onChange: () => refresh()
+    },
+    diagnostics: {
+        type: OptionType.COMPONENT,
+        description: "What's working, and any errors to report",
+        component: () => <Diagnostics />
     },
     choices: {
         type: OptionType.CUSTOM,
@@ -130,34 +151,52 @@ const settings = definePluginSettings({
 
 // settings.plain leaves out defaults for settings that were never saved, and these are read while Discord renders
 function savedSettings() {
-    const { choices, order, learnedDetails } = settings.plain;
-    return { choices: choices ?? {}, order: order ?? [], learnedDetails: learnedDetails ?? {} };
+    const { choices, order, learnedDetails, seeShared } = settings.plain;
+    return { choices: choices ?? {}, order: order ?? [], learnedDetails: learnedDetails ?? {}, seeShared: seeShared ?? true };
 }
 
-const isDiscordBadge = (badge: DirectoryBadge): badge is DirectoryBadge & { badge_id: number; } => typeof badge?.badge_id === "number";
+const isDiscordBadge = (badge: DirectoryBadge | undefined): badge is NumberedBadge => typeof badge?.badge_id === "number";
 
 function currentUserId() {
     return UserStore.getCurrentUser()?.id;
 }
 
+function storeIsPatched() {
+    return typeof BadgeDirectoryStore[ORIGINAL_CATALOG] === "function";
+}
+
+/** Discord's badge list without our changes, or an empty one if Discord changed the store */
+function rawCatalog(userId: string) {
+    return BadgeDirectoryStore[ORIGINAL_CATALOG]?.(userId) ?? [];
+}
+
 function refresh() {
     revision++;
     ownBadgeCache = new WeakMap();
+    detailedBadgeCache = new WeakMap();
     BadgeDirectoryStore.emitChange();
     if (settings.store.shareSelections) schedulePublish();
 }
 
 function setChoice(badgeId: number, change: BadgeChoice) {
-    // settings.plain because a spread of settings.store copies proxies, which can't be cloned when settings save
-    const { choices } = savedSettings();
-    settings.store.choices = { ...choices, [badgeId]: { ...choices[badgeId], ...change } };
-    refresh();
+    guard("CHOICE_SAVE", () => undefined, () => {
+        // settings.plain because a spread of settings.store copies proxies, which can't be cloned when settings save
+        const { choices } = savedSettings();
+        settings.store.choices = { ...choices, [badgeId]: { ...choices[badgeId], ...change } };
+        refresh();
+    });
 }
 
 function requestCatalog(userId: string) {
     if (catalogRequested || BadgeDirectoryStore.hasCatalogFor(userId)) return;
     catalogRequested = true;
-    setTimeout(() => fetchBadgeCatalog(userId));
+    setTimeout(() => {
+        try {
+            fetchBadgeCatalog(userId).catch(e => report("CATALOG_FETCH", e));
+        } catch (e) {
+            report("CATALOG_FETCH", e);
+        }
+    });
 }
 
 function sharedFor(bio?: string | null) {
@@ -172,7 +211,7 @@ function sharedFor(bio?: string | null) {
 }
 
 function sharedForUser(userId: string) {
-    return settings.store.seeShared ? sharedFor(UserProfileStore.getUserProfile(userId)?.bio) : null;
+    return savedSettings().seeShared ? sharedFor(UserProfileStore.getUserProfile(userId)?.bio) : null;
 }
 
 function ownBadge(badge: DirectoryBadge) {
@@ -185,32 +224,72 @@ function ownBadge(badge: DirectoryBadge) {
     return result;
 }
 
-function sharedBadge(badge: DirectoryBadge & { badge_id: number; }, shared: SharedBadges) {
-    const cached = sharedBadgeCache.get(badge);
-    if (cached?.shared === shared) return cached.badge;
+function detailedBadge(badge: DirectoryBadge) {
+    let detailed = detailedBadgeCache.get(badge);
+    if (!detailed) {
+        detailed = withBadgeDetails(badge, savedSettings().learnedDetails[badge.badge_id]);
+        detailedBadgeCache.set(badge, detailed);
+    }
+    return detailed;
+}
 
-    const result = applyShared(badge, shared.get(badge.badge_id), savedSettings().learnedDetails[badge.badge_id]);
-    sharedBadgeCache.set(badge, { shared, badge: result });
+/**
+ * Someone's badges as they shared them. The profile row and the badge window both read this, so they always agree.
+ * Discord only lists badges a person owns, so shared ones they don't own are built from your own copy of that badge.
+ */
+function sharedCatalog(userId: string, shared: SharedBadges): SharedCatalog {
+    const me = currentUserId();
+    const theirs = rawCatalog(userId).filter(isDiscordBadge);
+    const mine = me ? rawCatalog(me).filter(isDiscordBadge) : [];
+    const sources = [...theirs, ...mine];
+
+    const cached = sharedCatalogs.get(userId);
+    if (cached && cached.shared === shared && cached.revision === revision
+        && cached.sources.length === sources.length && cached.sources.every((badge, i) => badge === sources[i])) {
+        return cached;
+    }
+
+    const { learnedDetails } = savedSettings();
+    const theirById = new Map(theirs.map(badge => [badge.badge_id, badge]));
+    const mineById = new Map(mine.map(badge => [badge.badge_id, badge]));
+
+    const badges: NumberedBadge[] = [];
+    for (const [id, tierIndex] of shared) {
+        const own = mineById.get(id);
+        const source = theirById.get(id) ?? (own && asTemplate(own));
+        if (!source) continue;
+        badges.push({ ...applyShared(source, tierIndex, learnedDetails[id]), badge_id: id });
+    }
+    for (const badge of theirs) {
+        if (!shared.has(badge.badge_id)) badges.push({ ...applyShared(badge, undefined, learnedDetails[badge.badge_id]), badge_id: badge.badge_id });
+    }
+
+    const result = { shared, revision, sources, badges, byId: new Map(badges.map(badge => [badge.badge_id, badge])) };
+    sharedCatalogs.delete(userId);
+    sharedCatalogs.set(userId, result);
+    if (sharedCatalogs.size > SHARED_CACHE_LIMIT) sharedCatalogs.delete(sharedCatalogs.keys().next().value as string);
     return result;
 }
 
-function toProfileBadge(badge: DirectoryBadge & { badge_id: number; }, originals: Map<number, ProfileBadge>, hasCustomTier: (badgeId: number) => boolean): ProfileBadge {
+function toProfileBadge(badge: NumberedBadge, originals: Map<number, ProfileBadge>, hasCustomTier: (badgeId: number) => boolean): ProfileBadge | null {
     const original = originals.get(badge.badge_id);
     if (original && !hasCustomTier(badge.badge_id)) return original;
 
-    const id = original?.id ?? BadgeIds.toLegacyId(badge.badge_id);
+    const iconSrc = badgeIcon(badge) ?? original?.iconSrc;
+    if (!iconSrc && !original?.icon) return null;
 
+    const id = original?.id ?? BadgeIds.toLegacyId(badge.badge_id);
     return {
         ...original,
         id,
         icon: original?.icon ?? id,
-        iconSrc: badge.simple_icon_raster_url ?? badge.simple_icon_url,
+        iconSrc,
         description: original?.description ?? badge.name
     };
 }
 
 /** Replaces the Discord badges in a profile's list and keeps ones from other plugins where they were */
-function replaceDiscordBadges(badges: ProfileBadge[], shown: Array<DirectoryBadge & { badge_id: number; }>, hasCustomTier: (badgeId: number) => boolean) {
+function replaceDiscordBadges(badges: ProfileBadge[], shown: NumberedBadge[], hasCustomTier: (badgeId: number) => boolean) {
     const originals = new Map<number, ProfileBadge>();
     let firstDiscordBadge = -1;
     const others = badges.filter((badge, index) => {
@@ -223,16 +302,19 @@ function replaceDiscordBadges(badges: ProfileBadge[], shown: Array<DirectoryBadg
     });
 
     const leading = firstDiscordBadge === -1 ? others.length : badges.slice(0, firstDiscordBadge).length;
-    return [...others.slice(0, leading), ...shown.map(badge => toProfileBadge(badge, originals, hasCustomTier)), ...others.slice(leading)];
+    const replaced = shown.map(badge => toProfileBadge(badge, originals, hasCustomTier)).filter(badge => badge != null);
+    return [...others.slice(0, leading), ...replaced, ...others.slice(leading)];
 }
 
 function encodeOwnBadges(userId: string) {
-    const shown = BadgeDirectoryStore.getBadges(userId).filter(badge => isDiscordBadge(badge) && !badge.hidden);
-
-    return encodeShare(shown.map(badge => ({
-        id: badge.badge_id as number,
+    const shown = BadgeDirectoryStore.getBadges(userId).filter(isDiscordBadge).filter(badge => !badge.hidden);
+    const entries = shown.map(badge => ({
+        id: badge.badge_id,
         tierIndex: Math.max(badge.tiers?.findIndex((tier: BadgeTier) => tier.key === badge.current_tier) ?? 0, 0)
-    })));
+    }));
+    if (entries.some(({ id, tierIndex }) => id >= 36 || tierIndex >= 36)) report("SHARE_UNSUPPORTED");
+
+    return encodeShare(entries);
 }
 
 async function publishShare() {
@@ -246,21 +328,29 @@ async function publishShare() {
         if (bio === current) return;
 
         if (bio.length > BIO_LIMIT) {
-            showToast({ text: "Your bio is too long to fit your badge choices.", variant: "critical" });
+            report("SHARE_TOO_LONG");
             return;
         }
 
         await RestAPI.patch({ url: Constants.Endpoints.USER_PROFILE("@me"), body: { bio } });
         await fetchUserProfile(userId, undefined, false);
     } catch (e) {
-        logger.error("Failed to update badge sharing", e);
-        showToast({ text: "Couldn't update your shared badge choices.", variant: "critical" });
+        report("SHARE_PUBLISH", e);
     }
 }
 
 function schedulePublish() {
     clearTimeout(publishTimer);
     publishTimer = setTimeout(publishShare, PUBLISH_DELAY);
+}
+
+function checkHealth() {
+    if (!storeIsPatched()) report("PATCH_MISSING", "BadgeDirectoryStore is not patched");
+    try {
+        if (typeof BadgeIds.toBadgeId !== "function" || typeof BadgeIds.toLegacyId !== "function") report("BADGE_IDS", "Badge id helpers missing");
+    } catch (e) {
+        report("BADGE_IDS", e);
+    }
 }
 
 function useBadgeRevision() {
@@ -277,7 +367,7 @@ function BadgeSelect() {
         return <div className={cl("empty")}>Your badges are loading.</div>;
     }
 
-    const icons = new Map(badges.map(badge => [badge.badge_id, badge.simple_icon_url]));
+    const icons = new Map(badges.map(badge => [badge.badge_id, badgeIcon(badge)]));
 
     return (
         <>
@@ -287,7 +377,7 @@ function BadgeSelect() {
                 placeholder="All badges hidden"
                 options={badges.map(badge => ({ label: badge.name, value: badge.badge_id }))}
                 value={badges.filter(badge => !badge.hidden).map(badge => badge.badge_id)}
-                onChange={(values: number[]) => {
+                onChange={(values: number[]) => guard("CHOICE_SAVE", () => undefined, () => {
                     const visible = new Set(values);
                     const choices = { ...savedSettings().choices };
                     for (const { badge_id } of badges) {
@@ -295,7 +385,7 @@ function BadgeSelect() {
                     }
                     settings.store.choices = choices;
                     refresh();
-                }}
+                })}
                 renderOptionPrefix={option => {
                     const icon = option && icons.get(option.value);
                     return icon ? <img className={cl("icon")} src={icon} alt="" /> : null;
@@ -318,6 +408,41 @@ function BadgeSelect() {
                 </Button>
             </div>
         </>
+    );
+}
+
+function diagnosticsLines() {
+    const userId = currentUserId();
+    const patched = storeIsPatched();
+    const catalog = patched && userId ? rawCatalog(userId).filter(isDiscordBadge) : [];
+    const newBadges = catalog.filter(badge => badge.badge_id > KNOWN_BADGE_COUNT).map(badge => badge.name);
+    const errors = getErrors();
+
+    return [
+        `AAB diagnostics (Equicord ${VERSION})`,
+        `Badge menus: ${patched ? "working" : `not patched (${ERRORS.PATCH_MISSING.code})`}`,
+        `Discord experiment: ${experimentForced ? "on" : "not seen yet"}`,
+        `Your badges: ${catalog.length ? `${catalog.length} loaded` : "not loaded yet"}`,
+        `New badges Discord added: ${newBadges.length ? newBadges.join(", ") : "none"}`,
+        `Sharing: ${settings.store.shareSelections ? "on" : "off"}, showing others' choices: ${settings.store.seeShared ? "on" : "off"}`,
+        errors.length ? "Errors this session:" : "Errors this session: none",
+        ...errors.map(e => `${e.code} x${e.count}: ${e.message}${e.detail ? ` [${e.detail}]` : ""}`)
+    ];
+}
+
+function Diagnostics() {
+    useBadgeRevision();
+    const lines = diagnosticsLines();
+
+    return (
+        <div className={cl("diagnostics")}>
+            {lines.slice(1).map(line => <div key={line} className={cl("diagnostics-line")}>{line}</div>)}
+            <div className={cl("actions")}>
+                <Button size="small" variant="secondary" onClick={() => copyWithToast(lines.join("\n"), "Diagnostics copied.")}>
+                    Copy Diagnostics
+                </Button>
+            </div>
+        </div>
     );
 }
 
@@ -396,7 +521,7 @@ const plugin = definePlugin({
                 },
                 {
                     match: /getBadgeById\((\i),(\i)\)\{/,
-                    replace: `getBadgeById($1,$2){return $self.badge(this.${ORIGINAL_BADGE}($1,$2),$2)}${ORIGINAL_BADGE}($1,$2){`
+                    replace: `getBadgeById($1,$2){return $self.badge(this.${ORIGINAL_BADGE}($1,$2),$2,$1)}${ORIGINAL_BADGE}($1,$2){`
                 }
             ]
         },
@@ -493,7 +618,19 @@ const plugin = definePlugin({
             const userId = currentUserId();
             if (userId) requestCatalog(userId);
         },
+        BADGE_DIRECTORY_FETCH_FAILURE({ userId }: { userId: string; }) {
+            if (userId !== currentUserId()) return;
+
+            report("CATALOG_FETCH", "Badge catalog request failed");
+            clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => {
+                catalogRequested = false;
+                requestCatalog(userId);
+            }, CATALOG_RETRY_DELAY);
+        },
         BADGE_DIRECTORY_FETCH_SUCCESS({ badges }: { badges: DirectoryBadge[]; }) {
+            if (!Array.isArray(badges)) return;
+
             const learned = { ...savedSettings().learnedDetails };
             let changed = false;
             for (const { badge_id, owned, description, info_label } of badges) {
@@ -507,6 +644,7 @@ const plugin = definePlugin({
             if (!changed) return;
 
             settings.store.learnedDetails = learned;
+            revision++;
             ownBadgeCache = new WeakMap();
             detailedBadgeCache = new WeakMap();
         }
@@ -515,103 +653,113 @@ const plugin = definePlugin({
     start() {
         const userId = currentUserId();
         if (userId) requestCatalog(userId);
+        healthTimer = setTimeout(checkHealth, HEALTH_CHECK_DELAY);
     },
 
     stop() {
         clearTimeout(publishTimer);
+        clearTimeout(retryTimer);
+        clearTimeout(healthTimer);
     },
 
     forceExperiment(experiment: BadgeExperiment) {
+        if (typeof experiment?.getConfig !== "function" || typeof experiment.useConfig !== "function") {
+            logger.warn("Badge management experiment has an unexpected shape, leaving it alone");
+            return experiment;
+        }
+
         const force = (config: object) => ({ ...config, enabled: true, tenureBadgeHideable: true });
         const { getConfig, useConfig } = experiment;
 
         experiment.getConfig = options => force(getConfig.call(experiment, options));
         experiment.useConfig = options => force(useConfig.call(experiment, options));
+        experimentForced = true;
         return experiment;
     },
 
-    badge(badge: DirectoryBadge | undefined, userId?: string) {
-        if (!badge || !isDiscordBadge(badge)) return badge;
+    badge(badge: DirectoryBadge | undefined, userId?: string, badgeId?: number) {
+        return guard("BADGE_RENDER", () => badge, () => {
+            const me = currentUserId();
+            if ((userId ?? me) !== me && userId) {
+                const shared = sharedForUser(userId);
+                const id = badge?.badge_id ?? badgeId;
+                if (shared && typeof id === "number") return sharedCatalog(userId, shared).byId.get(id) ?? badge;
+            }
 
-        const me = currentUserId();
-        if ((userId ?? me) === me) return ownBadge(badge);
-
-        const shared = userId ? sharedForUser(userId) : null;
-        if (shared) return sharedBadge(badge, shared);
-
-        let detailed = detailedBadgeCache.get(badge);
-        if (!detailed) {
-            detailed = withBadgeDetails(badge, savedSettings().learnedDetails[badge.badge_id]);
-            detailedBadgeCache.set(badge, detailed);
-        }
-        return detailed;
+            if (!isDiscordBadge(badge)) return badge;
+            return (userId ?? me) === me ? ownBadge(badge) : detailedBadge(badge);
+        });
     },
 
     catalog(badges: DirectoryBadge[], userId?: string) {
-        const me = currentUserId();
-        if ((userId ?? me) !== me) return badges.map(badge => this.badge(badge, userId) as DirectoryBadge);
+        return guard("BADGE_RENDER", () => badges, () => {
+            const me = currentUserId();
+            if ((userId ?? me) !== me && userId) {
+                const shared = sharedForUser(userId);
+                if (shared) return sharedCatalog(userId, shared).badges;
+                return badges.map(badge => isDiscordBadge(badge) ? detailedBadge(badge) : badge);
+            }
 
-        // Same order as Discord: Staff, shown badges in your order, hidden badges you own, then the rest in catalog order
-        const { order } = savedSettings();
-        const position = new Map(order.map((id, index) => [id, index]));
-        const ranked = badges.map(raw => {
-            const badge = this.badge(raw, userId) as DirectoryBadge;
-            const group = raw.badge_id === STAFF_BADGE_ID ? 0 : !badge.hidden ? 1 : raw.owned ? 2 : 3;
-            return { badge, group, position: group === 1 ? position.get(raw.badge_id as number) ?? order.length : 0 };
+            // Same order as Discord: Staff, shown badges in your order, hidden badges you own, then the rest in catalog order
+            const { order } = savedSettings();
+            const position = new Map(order.map((id, index) => [id, index]));
+            const ranked = badges.map(raw => {
+                if (!isDiscordBadge(raw)) return { badge: raw, group: 4, position: 0 };
+
+                const badge = ownBadge(raw);
+                const group = raw.badge_id === STAFF_BADGE_ID ? 0 : !badge.hidden ? 1 : raw.owned ? 2 : 3;
+                return { badge, group, position: group === 1 ? position.get(raw.badge_id) ?? order.length : 0 };
+            });
+
+            return ranked.sort((a, b) => a.group - b.group || a.position - b.position).map(({ badge }) => badge);
         });
-
-        return ranked.sort((a, b) => a.group - b.group || a.position - b.position).map(({ badge }) => badge);
     },
 
     profileBadges(profile: DisplayProfile, badges: ProfileBadge[]) {
-        const { userId } = profile;
-        if (!Array.isArray(badges) || !userId) return badges;
+        return guard("PROFILE_RENDER", () => badges, () => {
+            const userId = profile?.userId;
+            const me = currentUserId();
+            if (!Array.isArray(badges) || !userId || !me || !storeIsPatched()) return badges;
 
-        const me = currentUserId();
-        if (!me) return badges;
-
-        if (userId === me) {
             if (!BadgeDirectoryStore.hasCatalogFor(me)) {
                 requestCatalog(me);
                 return badges;
             }
-            const { choices } = savedSettings();
-            return replaceDiscordBadges(
-                badges,
-                BadgeDirectoryStore.getBadges(me).filter(isDiscordBadge).filter(badge => !badge.hidden),
-                badgeId => choices[badgeId]?.tier != null
-            );
-        }
 
-        const shared = settings.store.seeShared ? sharedFor(profile._userProfile?.bio) : null;
-        if (!shared) return badges;
+            if (userId === me) {
+                const { choices } = savedSettings();
+                return replaceDiscordBadges(
+                    badges,
+                    BadgeDirectoryStore.getBadges(me).filter(isDiscordBadge).filter(badge => !badge.hidden),
+                    badgeId => choices[badgeId]?.tier != null
+                );
+            }
 
-        if (!BadgeDirectoryStore.hasCatalogFor(me)) {
-            requestCatalog(me);
-            return badges;
-        }
+            const shared = sharedForUser(userId);
+            if (!shared) return badges;
 
-        const catalog = new Map(BadgeDirectoryStore[ORIGINAL_CATALOG](me).filter(isDiscordBadge).map(badge => [badge.badge_id, badge]));
-        const shown = Array.from(shared, ([id, tierIndex]) => {
-            const badge = catalog.get(id);
-            return badge && { ...applyShared(badge, tierIndex), badge_id: id };
-        }).filter(badge => badge != null);
-
-        return replaceDiscordBadges(badges, shown, () => true);
+            return replaceDiscordBadges(badges, sharedCatalog(userId, shared).badges.filter(badge => badge.owned), () => true);
+        });
     },
 
     setOrder(order: number[]) {
-        settings.store.order = [...order];
-        refresh();
+        guard("CHOICE_SAVE", () => undefined, () => {
+            settings.store.order = Array.isArray(order) ? [...order] : [];
+            refresh();
+        });
     },
 
     setVisibility({ badgeId, hidden, reorderableBadgeIds, canReorder }: { badgeId: number; hidden: boolean; reorderableBadgeIds: number[]; canReorder: boolean; }) {
-        if (canReorder) settings.store.order = hidden ? reorderableBadgeIds.filter(id => id !== badgeId) : [...reorderableBadgeIds, badgeId];
-        setChoice(badgeId, { hidden });
+        guard("CHOICE_SAVE", () => undefined, () => {
+            if (canReorder && Array.isArray(reorderableBadgeIds)) {
+                settings.store.order = hidden ? reorderableBadgeIds.filter(id => id !== badgeId) : [...reorderableBadgeIds, badgeId];
+            }
+            setChoice(badgeId, { hidden });
+        });
     },
 
     tierProps({ badge, isViewingOtherUser }: BadgeDetailProps, tier: BadgeTier) {
-        if (isViewingOtherUser || !isDiscordBadge(badge)) return null;
+        if (isViewingOtherUser || !isDiscordBadge(badge) || !tier?.key) return null;
 
         const selected = badge.current_tier === tier.key;
         const select = () => {
