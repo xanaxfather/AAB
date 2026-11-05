@@ -6,7 +6,7 @@
 
 import "./styles.css";
 
-import { definePluginSettings } from "@api/Settings";
+import { definePluginSettings, migratePluginSettings } from "@api/Settings";
 import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
 import { classNameFactory } from "@utils/css";
@@ -20,12 +20,12 @@ import type { ComponentType, KeyboardEvent, ReactNode } from "react";
 import { applyChoice, applyShared, BadgeChoice, BadgeDetails, BadgeTier, decodeShare, DirectoryBadge, encodeShare, isLearnableBadge, SharedBadges, STAFF_BADGE_ID, stripShare, withBadgeDetails } from "./badges";
 
 const cl = classNameFactory("vc-hmb-");
-const logger = new Logger("HideMyBadges");
+const logger = new Logger("AAB");
 
 // Name of the method our patch moves Discord's original getBadges() body into
-const ORIGINAL_GET_BADGES = "vcHideMyBadgesOriginal";
-const ORIGINAL_CATALOG = "vcHideMyBadgesCatalog";
-const ORIGINAL_BADGE = "vcHideMyBadgesBadge";
+const ORIGINAL_GET_BADGES = "vcAABOriginal";
+const ORIGINAL_CATALOG = "vcAABCatalog";
+const ORIGINAL_BADGE = "vcAABBadge";
 
 const TITLE = "Profile Badges";
 const DESCRIPTION = "Choose which badges you see on your own profile. Only you see this change unless you turn on sharing.";
@@ -365,8 +365,10 @@ const BadgeVisibilityButton = ErrorBoundary.wrap(function BadgeVisibilityButton(
     );
 }, { noop: true });
 
+migratePluginSettings("AAB", "HideMyBadges");
+
 const plugin = definePlugin({
-    name: "HideMyBadges",
+    name: "AAB",
     description: "Show, hide, reorder and pick tiers for every Discord badge from Discord's own badge menus. Client-side, with optional sharing between people who use this plugin.",
     authors: [{ name: "You", id: 0n }],
     dependencies: ["BadgeAPI"],

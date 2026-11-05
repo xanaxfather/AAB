@@ -4,8 +4,6 @@ An [Equicord](https://github.com/Equicord/Equicord) plugin that lets you choose 
 
 Everything is client-side. It doesn't give you real badges or change what Discord has on record for your account. People without this plugin keep seeing your real badges.
 
-> In Equicord's plugin list this plugin appears as **HideMyBadges**.
-
 ## What it does
 
 - **Every badge in one place:** lists all the badges in Discord's catalog, with Discord's own icons, names and tier lists, in the native "Customize your badges" popout and "Your badges" window.
@@ -82,7 +80,7 @@ If macOS blocks the installer from changing Discord, allow your terminal under *
 
 1. Open Discord.
 2. Go to **User Settings > Equicord > Plugins**.
-3. Search for **HideMyBadges** and enable it.
+3. Search for **AAB** and enable it.
 4. Restart Discord when asked.
 
 Then open your profile and click your badges, or the pencil next to them, to open **Customize your badges**. Click **View Badges** for the full window.
