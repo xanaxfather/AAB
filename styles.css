@@ -1,0 +1,66 @@
+.vc-hmb-icon {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    margin-right: 8px;
+    object-fit: contain;
+}
+
+.vc-hmb-panel-description,
+.vc-hmb-empty {
+    margin-bottom: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.vc-hmb-empty {
+    margin-bottom: 0;
+    font-size: 14px;
+}
+
+.vc-hmb-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.vc-hmb-visibility {
+    position: absolute;
+    z-index: 2;
+    top: 16px;
+    right: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    color: var(--interactive-icon-default);
+    cursor: pointer;
+}
+
+.vc-hmb-visibility:hover {
+    background: var(--background-mod-subtle);
+    color: var(--interactive-icon-hover);
+}
+
+[data-vc-hmb-hidden="true"] {
+    opacity: 0.35;
+    filter: grayscale(1);
+}
+
+[data-vc-hmb-tier] {
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+[data-vc-hmb-tier]:hover,
+[data-vc-hmb-tier]:focus-visible {
+    background: var(--background-mod-subtle);
+}
+
+[data-vc-hmb-tier="selected"] {
+    outline: 2px solid var(--brand-500);
+    outline-offset: -2px;
+}
