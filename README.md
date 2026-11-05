@@ -125,11 +125,11 @@ Then restart Discord.
 
 ## Uninstall
 
-Turn off sharing first and wait a few seconds so the code is removed from your bio. Then, from your Equicord folder:
+Turn off sharing first and wait a few seconds so the code is removed from your bio.
 
-To remove only this plugin, delete `src/userplugins/AAB`, run `pnpm build`, and restart Discord.
+To remove only this plugin, delete `src/userplugins/AAB` from your Equicord folder, run `pnpm build`, and restart Discord.
 
-To remove Equicord too, close Discord and run:
+To remove Equicord too, close Discord and run this from your Equicord folder:
 
 ```bash
 pnpm uninject
