@@ -13,7 +13,7 @@ import { classNameFactory } from "@utils/css";
 import { copyWithToast, fetchUserProfile } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
 import { filters, findByCodeLazy, findByPropsLazy, findComponentByCodeLazy, findExportedComponentLazy, findStoreLazy, mapMangledModuleLazy } from "@webpack";
-import { Clickable, Constants, RestAPI, SearchableSelect, Tooltip, UserProfileStore, UserStore, useStateFromStores } from "@webpack/common";
+import { Clickable, Constants, FluxDispatcher, RestAPI, SearchableSelect, Tooltip, UserProfileStore, UserStore, useStateFromStores } from "@webpack/common";
 import type { ComponentType, KeyboardEvent, ReactNode } from "react";
 
 import { applyChoice, applyShared, asTemplate, BadgeChoice, BadgeDetails, badgeIcon, BadgeTier, decodeShare, DirectoryBadge, encodeShare, isLearnableBadge, SharedBadges, STAFF_BADGE_ID, stripShare, withBadgeDetails } from "./badges";
@@ -102,6 +102,7 @@ const sharedByBio = new Map<string, SharedBadges | null>();
 const sharedCatalogs = new Map<string, SharedCatalog>();
 let catalogRequested = false;
 let experimentForced = false;
+let nativeSaveCaught = false;
 let publishTimer: ReturnType<typeof setTimeout> | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let healthTimer: ReturnType<typeof setTimeout> | undefined;
@@ -422,6 +423,7 @@ function diagnosticsLines() {
         `AAB diagnostics (Equicord ${VERSION})`,
         `Badge menus: ${patched ? "working" : `not patched (${ERRORS.PATCH_MISSING.code})`}`,
         `Discord experiment: ${experimentForced ? "on" : "not seen yet"}`,
+        `Hide and reorder: ${nativeSaveCaught ? "using fallback, the patches need updating" : "working"}`,
         `Your badges: ${catalog.length ? `${catalog.length} loaded` : "not loaded yet"}`,
         `New badges Discord added: ${newBadges.length ? newBadges.join(", ") : "none"}`,
         `Sharing: ${settings.store.shareSelections ? "on" : "off"}, showing others' choices: ${settings.store.seeShared ? "on" : "off"}`,
@@ -537,8 +539,8 @@ const plugin = definePlugin({
             find: '.milestone_text??""',
             replacement: [
                 {
-                    match: /(?<=tenureBadgeHideable:\i\}=\i;return new Set\()/,
-                    replace: "[]||"
+                    match: /(?<=tenureBadgeHideable:\i\}=\i;return new Set\()\i\?\[[^\]]{0,80}\]:\[[^\]]{0,80}\](?=\))/,
+                    replace: "[]"
                 },
                 {
                     match: /(?<=let \i=new Set\()\[\i\.\i\.GAME_VARIETY,\i\.\i\.GAME_TIME,\i\.\i\.STREAMING\]/,
@@ -550,13 +552,14 @@ const plugin = definePlugin({
         {
             find: '"USER_PROFILE_SETTINGS_SET_PENDING_CHANGES",pendingBadgeDisplayOrder:',
             replacement: [
+                // Anchored on the bodies only, because Discord's bundler moves these between named functions and object properties
                 {
-                    match: /function \i\((\i)\)\{(?=var \i;let \i=\i\(\),\i=null!=\i&&\(\i=\i\.displayOrder)/,
-                    replace: "$&return $self.setOrder($1);"
+                    match: /(?<=\((\i)\)\{)(?=var \i;let \i=\i\(\),\i=null!=\i&&\(\i=\i\.displayOrder)/,
+                    replace: "return $self.setOrder($1);"
                 },
                 {
-                    match: /function \i\((\i)\)\{(?=var \i,\i;let \i,\i,\{badgeId:)/,
-                    replace: "$&return $self.setVisibility($1);"
+                    match: /(?<=\((\i)\)\{)(?=var \i,\i;let \i,\i,\{badgeId:)/,
+                    replace: "return $self.setVisibility($1);"
                 }
             ]
         },
@@ -617,6 +620,33 @@ const plugin = definePlugin({
         CONNECTION_OPEN() {
             const userId = currentUserId();
             if (userId) requestCatalog(userId);
+        },
+        // Only reached if the patches above stop matching. Keeps hide and reorder local instead of leaving them for Discord's Save button.
+        USER_PROFILE_SETTINGS_SET_PENDING_CHANGES({ pendingBadgeDisplayOrder: order, pendingBadgeHiddenBadges: hidden }: { pendingBadgeDisplayOrder?: number[]; pendingBadgeHiddenBadges?: number[]; }) {
+            if (order === undefined && hidden === undefined) return;
+
+            if (!nativeSaveCaught) logger.warn("Badge save patches didn't apply, handling hide and reorder through the fallback");
+            nativeSaveCaught = true;
+
+            const userId = currentUserId();
+            if (Array.isArray(hidden) && userId) {
+                const hiddenIds = new Set(hidden);
+                const choices = { ...savedSettings().choices };
+                for (const { badge_id } of rawCatalog(userId).filter(isDiscordBadge)) {
+                    // Staff sits outside Discord's hidden list, so it's only ever added here
+                    if (badge_id === STAFF_BADGE_ID && !hiddenIds.has(badge_id)) continue;
+                    choices[badge_id] = { ...choices[badge_id], hidden: hiddenIds.has(badge_id) };
+                }
+                settings.store.choices = choices;
+            }
+            if (Array.isArray(order)) settings.store.order = [...order];
+            refresh();
+
+            setTimeout(() => FluxDispatcher.dispatch({
+                type: "USER_PROFILE_SETTINGS_SET_PENDING_CHANGES",
+                pendingBadgeDisplayOrder: undefined,
+                pendingBadgeHiddenBadges: undefined
+            }));
         },
         BADGE_DIRECTORY_FETCH_FAILURE({ userId }: { userId: string; }) {
             if (userId !== currentUserId()) return;
