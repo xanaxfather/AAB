@@ -462,8 +462,7 @@ const PanelBadgeSection = ErrorBoundary.wrap(function PanelBadgeSection({ guildI
     if (!Section || guildId != null) return null;
 
     return (
-        <Section heading={TITLE}>
-            <div className={cl("panel-description")}>{DESCRIPTION}</div>
+        <Section heading={TITLE} description={DESCRIPTION}>
             <BadgeSelect />
         </Section>
     );
@@ -502,7 +501,7 @@ const plugin = definePlugin({
     settings,
 
     /** Section wrapper of the in-profile editor, grabbed by a patch since the module doesn't export it */
-    PanelSection: null as ComponentType<{ heading: ReactNode; children?: ReactNode; }> | null,
+    PanelSection: null as ComponentType<{ heading: ReactNode; description?: ReactNode; children?: ReactNode; }> | null,
 
     patches: [
         // Wrap DisplayProfile#getBadges. BadgeAPI patches the same method first, so Vencord/Equicord badges are included.
@@ -602,12 +601,12 @@ const plugin = definePlugin({
             find: '("UserProfileModalV2EditingPanel")',
             replacement: [
                 {
-                    match: /(?=function (\i)\(\i\)\{let\{heading:\i,children:\i,disabled:\i=!1,showNitroIcon:)/,
+                    match: /(?=function (\i)\(\i\)\{let\{heading:\i,[^}]{0,80}?showNitroIcon:\i=!1)/,
                     replace: "$self.PanelSection=$1;"
                 },
                 {
                     // Last editing section in the panel, before the Nitro try-it-out block
-                    match: /\(0,\i\.jsx\)\(\i,\{user:\i,guildId:(\i),disabled:\i\|\|\i\}\)(?=,\i&&\(0,\i\.jsxs\))/,
+                    match: /\(0,\i\.jsx\)\(\i,\{user:\i,guildId:(\i),disabled:\i\|\|\i\}\)(?=,\i&&\(0,\i\.jsxs?\))/,
                     replace: "$&,$self.renderPanelSection($1)"
                 }
             ]
